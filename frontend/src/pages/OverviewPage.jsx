@@ -1,18 +1,27 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, fmtINR, fmtNum, pct } from "../lib/api";
-import { TrendUp, TrendDown, Briefcase, Bell, Warning } from "@phosphor-icons/react";
+import { usePortfolio } from "../lib/portfolio.jsx";
+import { TrendUp, TrendDown, Briefcase, Bell, Warning, Pulse } from "@phosphor-icons/react";
 
 export default function OverviewPage() {
+  const { activeId } = usePortfolio() || {};
   const [data, setData] = useState(null);
   const [alerts, setAlerts] = useState([]);
+  const [xirr, setXirr] = useState(null);
   const [err, setErr] = useState("");
 
   useEffect(() => {
-    Promise.all([api.get("/portfolio"), api.get("/alerts")])
-      .then(([p, a]) => { setData(p.data); setAlerts(a.data); })
+    if (!activeId) return;
+    setData(null); setXirr(null);
+    Promise.all([
+      api.get("/portfolio", { params: { portfolio_id: activeId } }),
+      api.get("/alerts"),
+      api.get(`/portfolios/${activeId}/xirr`).catch(() => ({ data: null })),
+    ])
+      .then(([p, a, x]) => { setData(p.data); setAlerts(a.data); setXirr(x.data); })
       .catch((e) => setErr(e.response?.data?.detail || e.message));
-  }, []);
+  }, [activeId]);
 
   if (err) return <div className="text-destructive text-sm" data-testid="overview-error">{err}</div>;
   if (!data) return <div className="label-uppercase" data-testid="overview-loading">Loading...</div>;
@@ -24,6 +33,8 @@ export default function OverviewPage() {
     { label: "Invested", value: fmtINR(s.invested), sub: `${s.fund_count} schemes` },
     { label: "Current Value", value: fmtINR(s.current_value), sub: positive ? "Up" : "Down" },
     { label: "Net P&L", value: fmtINR(s.gain), sub: pct(s.gain_pct), pos: positive },
+    { label: "XIRR", value: xirr?.xirr_pct != null ? `${fmtNum(xirr.xirr_pct)}%` : "—",
+      sub: "annualised", pos: xirr?.xirr_pct != null ? xirr.xirr_pct >= 0 : undefined, icon: Pulse },
     { label: "Active Alerts", value: alerts.length.toString().padStart(2, "0"), sub: "across portfolio" },
   ];
 
@@ -39,8 +50,7 @@ export default function OverviewPage() {
         </Link>
       </div>
 
-      {/* KPI tiles */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 ticker-grid">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 ticker-grid">
         {tiles.map((t, i) => (
           <div key={i} className="bg-card p-5" data-testid={`kpi-${i}`}>
             <div className="label-uppercase">{t.label}</div>

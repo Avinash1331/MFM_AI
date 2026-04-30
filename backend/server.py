@@ -10,6 +10,7 @@ import uuid
 import logging
 import secrets
 import urllib.parse
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
 
@@ -17,7 +18,7 @@ import bcrypt
 import jwt
 import feedparser
 from bson import ObjectId
-from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends, Query
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field
@@ -38,11 +39,85 @@ JWT_SECRET = os.environ["JWT_SECRET"]
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@mfintel.com")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Admin@12345")
 
-app = FastAPI(title="MF Intelligence")
-api = APIRouter(prefix="/api")
-
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    await db.users.create_index("email", unique=True)
+    await db.portfolio.create_index([("user_id", 1)])
+    await db.portfolio.create_index([("portfolio_id", 1)])
+    await db.portfolios.create_index([("user_id", 1)])
+    await db.transactions.create_index([("user_id", 1), ("portfolio_id", 1)])
+
+    existing = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if existing is None:
+        await db.users.insert_one({
+            "email": ADMIN_EMAIL.lower(),
+            "name": "Admin",
+            "password_hash": hash_password(ADMIN_PASSWORD),
+            "role": "admin",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        log.info("Seeded admin %s", ADMIN_EMAIL)
+    elif not verify_password(ADMIN_PASSWORD, existing["password_hash"]):
+        await db.users.update_one(
+            {"email": ADMIN_EMAIL.lower()},
+            {"$set": {"password_hash": hash_password(ADMIN_PASSWORD)}},
+        )
+
+    # Migrate: ensure every user has a default portfolio + backfill legacy holdings
+    async for u in db.users.find({}, {"_id": 1}):
+        uid = str(u["_id"])
+        default = await db.portfolios.find_one({"user_id": uid, "is_default": True})
+        if not default:
+            default = {
+                "id": str(uuid.uuid4()),
+                "user_id": uid,
+                "name": "Main Portfolio",
+                "is_default": True,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await db.portfolios.insert_one(default.copy())
+        await db.portfolio.update_many(
+            {"user_id": uid, "portfolio_id": {"$exists": False}},
+            {"$set": {"portfolio_id": default["id"]}},
+        )
+        await db.portfolio.update_many(
+            {"user_id": uid, "purchase_date": {"$exists": False}},
+            [{"$set": {"purchase_date": "$added_at"}}],
+        )
+
+    # Seed admin's portfolio with 4 funds if empty
+    admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
+    if admin:
+        admin_id = str(admin["_id"])
+        admin_pf = await db.portfolios.find_one({"user_id": admin_id, "is_default": True})
+        if await db.portfolio.count_documents({"user_id": admin_id}) == 0:
+            seed = [
+                ("axis-bluechip", 200, 45.20, 540),
+                ("parag-flexi", 150, 62.40, 720),
+                ("kotak-emerg", 80, 95.10, 200),
+                ("hdfc-balanced", 50, 360.20, 90),
+            ]
+            for fid, u_, c, days_ago in seed:
+                pdate = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+                await db.portfolio.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": admin_id,
+                    "portfolio_id": admin_pf["id"],
+                    "fund_id": fid, "units": u_, "avg_cost": c,
+                    "purchase_date": pdate,
+                    "added_at": pdate,
+                })
+    yield
+    client.close()
+
+
+app = FastAPI(title="MF Intelligence", lifespan=lifespan)
+api = APIRouter(prefix="/api")
 
 # ------------------------------------------------------------------
 # Auth helpers
@@ -109,6 +184,25 @@ class PortfolioAddIn(BaseModel):
     fund_id: str
     units: float = Field(gt=0)
     avg_cost: float = Field(gt=0)
+    portfolio_id: Optional[str] = None
+    purchase_date: Optional[str] = None  # ISO date
+
+class PortfolioCreateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+
+class TransactionIn(BaseModel):
+    portfolio_id: Optional[str] = None
+    fund_id: str
+    type: str = Field(pattern="^(BUY|SELL)$")
+    units: float = Field(gt=0)
+    price: float = Field(gt=0)
+    date: Optional[str] = None
+
+class SipPlanIn(BaseModel):
+    monthly: float = Field(gt=0)
+    years: int = Field(ge=1, le=60)
+    expected_return: float = Field(ge=0, le=50)  # %
+    step_up: float = Field(default=0.0, ge=0, le=50)  # annual % step-up
 
 # ------------------------------------------------------------------
 # Auth endpoints
@@ -198,10 +292,14 @@ async def fund_detail(fund_id: str, current=Depends(get_current_user)):
 # Portfolio
 # ------------------------------------------------------------------
 @api.get("/portfolio")
-async def get_portfolio(current=Depends(get_current_user)):
-    items = await db.portfolio.find(
-        {"user_id": current["id"]}, {"_id": 0}
-    ).to_list(200)
+async def get_portfolio(
+    portfolio_id: Optional[str] = Query(None),
+    current=Depends(get_current_user),
+):
+    q: Dict[str, Any] = {"user_id": current["id"]}
+    if portfolio_id:
+        q["portfolio_id"] = portfolio_id
+    items = await db.portfolio.find(q, {"_id": 0}).to_list(500)
     enriched = []
     total_invested = 0.0
     total_current = 0.0
@@ -237,12 +335,28 @@ async def get_portfolio(current=Depends(get_current_user)):
 async def add_to_portfolio(body: PortfolioAddIn, current=Depends(get_current_user)):
     if not fund_by_id(body.fund_id):
         raise HTTPException(404, "Fund not found")
+    pf_id = body.portfolio_id
+    if pf_id:
+        owns = await db.portfolios.find_one({"id": pf_id, "user_id": current["id"]})
+        if not owns:
+            raise HTTPException(404, "Portfolio not found")
+    else:
+        default = await db.portfolios.find_one({"user_id": current["id"], "is_default": True})
+        if not default:
+            default = {"id": str(uuid.uuid4()), "user_id": current["id"],
+                       "name": "Main Portfolio", "is_default": True,
+                       "created_at": datetime.now(timezone.utc).isoformat()}
+            await db.portfolios.insert_one(default.copy())
+        pf_id = default["id"]
+    pdate = body.purchase_date or datetime.now(timezone.utc).isoformat()
     item = {
         "id": str(uuid.uuid4()),
         "user_id": current["id"],
+        "portfolio_id": pf_id,
         "fund_id": body.fund_id,
         "units": body.units,
         "avg_cost": body.avg_cost,
+        "purchase_date": pdate,
         "added_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.portfolio.insert_one(item.copy())
@@ -388,51 +502,221 @@ async def root():
     return {"service": "MF Intelligence", "ok": True}
 
 # ------------------------------------------------------------------
-# Startup
+# Portfolios (multi-portfolio support)
 # ------------------------------------------------------------------
-@app.on_event("startup")
-async def startup():
-    await db.users.create_index("email", unique=True)
-    await db.portfolio.create_index([("user_id", 1)])
-    # Seed admin
-    existing = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-    if existing is None:
-        await db.users.insert_one({
-            "email": ADMIN_EMAIL.lower(),
-            "name": "Admin",
-            "password_hash": hash_password(ADMIN_PASSWORD),
-            "role": "admin",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
-        log.info("Seeded admin %s", ADMIN_EMAIL)
-    elif not verify_password(ADMIN_PASSWORD, existing["password_hash"]):
-        await db.users.update_one(
-            {"email": ADMIN_EMAIL.lower()},
-            {"$set": {"password_hash": hash_password(ADMIN_PASSWORD)}}
+async def _ensure_default_portfolio(user_id: str) -> dict:
+    pf = await db.portfolios.find_one({"user_id": user_id, "is_default": True}, {"_id": 0})
+    if pf:
+        return pf
+    pf = {"id": str(uuid.uuid4()), "user_id": user_id,
+          "name": "Main Portfolio", "is_default": True,
+          "created_at": datetime.now(timezone.utc).isoformat()}
+    await db.portfolios.insert_one(pf.copy())
+    return pf
+
+
+@api.get("/portfolios")
+async def list_portfolios(current=Depends(get_current_user)):
+    await _ensure_default_portfolio(current["id"])
+    items = await db.portfolios.find(
+        {"user_id": current["id"]}, {"_id": 0}
+    ).sort("created_at", 1).to_list(50)
+    out = []
+    for p in items:
+        cnt = await db.portfolio.count_documents(
+            {"user_id": current["id"], "portfolio_id": p["id"]}
         )
-        log.info("Updated admin password")
+        out.append({**p, "fund_count": cnt})
+    return out
 
-    # Seed admin's portfolio with 4 funds if empty (so demo lights up immediately)
-    admin = await db.users.find_one({"email": ADMIN_EMAIL.lower()})
-    admin_id = str(admin["_id"])
-    if await db.portfolio.count_documents({"user_id": admin_id}) == 0:
-        seed = [
-            ("axis-bluechip", 200, 45.20),
-            ("parag-flexi", 150, 62.40),
-            ("kotak-emerg", 80, 95.10),
-            ("hdfc-balanced", 50, 360.20),
-        ]
-        for fid, u, c in seed:
-            await db.portfolio.insert_one({
-                "id": str(uuid.uuid4()),
-                "user_id": admin_id,
-                "fund_id": fid, "units": u, "avg_cost": c,
-                "added_at": datetime.now(timezone.utc).isoformat(),
+
+@api.post("/portfolios")
+async def create_portfolio(body: PortfolioCreateIn, current=Depends(get_current_user)):
+    pf = {"id": str(uuid.uuid4()), "user_id": current["id"],
+          "name": body.name.strip(), "is_default": False,
+          "created_at": datetime.now(timezone.utc).isoformat()}
+    await db.portfolios.insert_one(pf.copy())
+    return pf
+
+
+@api.delete("/portfolios/{pid}")
+async def delete_portfolio(pid: str, current=Depends(get_current_user)):
+    pf = await db.portfolios.find_one({"id": pid, "user_id": current["id"]})
+    if not pf:
+        raise HTTPException(404, "Not found")
+    if pf.get("is_default"):
+        raise HTTPException(400, "Cannot delete default portfolio")
+    await db.portfolio.delete_many({"user_id": current["id"], "portfolio_id": pid})
+    await db.transactions.delete_many({"user_id": current["id"], "portfolio_id": pid})
+    await db.portfolios.delete_one({"id": pid, "user_id": current["id"]})
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------
+# XIRR (Newton-Raphson on cashflows)
+# ------------------------------------------------------------------
+def _xirr(cashflows: List[tuple]) -> Optional[float]:
+    """cashflows: list of (date, amount). Negative for outflow, positive for inflow."""
+    if len(cashflows) < 2:
+        return None
+    has_neg = any(cf < 0 for _, cf in cashflows)
+    has_pos = any(cf > 0 for _, cf in cashflows)
+    if not (has_neg and has_pos):
+        return None
+    d0 = cashflows[0][0]
+    rate = 0.1
+    for _ in range(200):
+        f, df = 0.0, 0.0
+        for d, cf in cashflows:
+            t = (d - d0).days / 365.0
+            base = (1.0 + rate)
+            if base <= 0:
+                return None
+            f += cf / base ** t
+            df += -t * cf / base ** (t + 1)
+        if abs(df) < 1e-12:
+            break
+        new_rate = rate - f / df
+        if abs(new_rate - rate) < 1e-8:
+            return new_rate
+        rate = max(new_rate, -0.999)
+    return rate
+
+
+def _parse_iso(s: str) -> datetime:
+    try:
+        d = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    except Exception:
+        return datetime.now(timezone.utc)
+
+
+@api.get("/portfolios/{pid}/xirr")
+async def portfolio_xirr(pid: str, current=Depends(get_current_user)):
+    pf = await db.portfolios.find_one({"id": pid, "user_id": current["id"]})
+    if not pf:
+        raise HTTPException(404, "Portfolio not found")
+    items = await db.portfolio.find(
+        {"user_id": current["id"], "portfolio_id": pid}, {"_id": 0}
+    ).to_list(500)
+    txns = await db.transactions.find(
+        {"user_id": current["id"], "portfolio_id": pid}, {"_id": 0}
+    ).to_list(500)
+    today = datetime.now(timezone.utc)
+    cashflows: List[tuple] = []
+    total_curr = 0.0
+    for it in items:
+        f = fund_by_id(it["fund_id"])
+        if not f:
+            continue
+        d = _parse_iso(it.get("purchase_date") or it.get("added_at"))
+        cashflows.append((d, -(it["units"] * it["avg_cost"])))
+        total_curr += it["units"] * f["nav"]
+    for t in txns:
+        d = _parse_iso(t.get("date") or t.get("added_at", today.isoformat()))
+        amt = t["units"] * t["price"]
+        cashflows.append((d, -amt if t["type"] == "BUY" else amt))
+    cashflows.append((today, total_curr))
+    cashflows.sort(key=lambda x: x[0])
+    rate = _xirr(cashflows)
+    return {
+        "xirr_pct": round(rate * 100, 2) if rate is not None else None,
+        "cashflow_count": len(cashflows),
+        "current_value": round(total_curr, 2),
+    }
+
+
+# ------------------------------------------------------------------
+# Tax report (Indian equity rules: STCG ≤1Y @15%, LTCG >1Y @10% above 1L)
+# ------------------------------------------------------------------
+@api.get("/portfolios/{pid}/tax-report")
+async def portfolio_tax(pid: str, current=Depends(get_current_user)):
+    pf = await db.portfolios.find_one({"id": pid, "user_id": current["id"]})
+    if not pf:
+        raise HTTPException(404, "Portfolio not found")
+    items = await db.portfolio.find(
+        {"user_id": current["id"], "portfolio_id": pid}, {"_id": 0}
+    ).to_list(500)
+    today = datetime.now(timezone.utc)
+    LTCG_EXEMPT = 100000.0
+    rows = []
+    st_gain = 0.0
+    lt_gain = 0.0
+    for it in items:
+        f = fund_by_id(it["fund_id"])
+        if not f:
+            continue
+        d = _parse_iso(it.get("purchase_date") or it.get("added_at"))
+        days = (today - d).days
+        invested = it["units"] * it["avg_cost"]
+        current_val = it["units"] * f["nav"]
+        gain = current_val - invested
+        is_long = days >= 365
+        if is_long:
+            lt_gain += gain
+        else:
+            st_gain += gain
+        rows.append({
+            "id": it["id"], "fund_id": f["id"], "fund_name": f["name"],
+            "category": f["category"],
+            "purchase_date": d.date().isoformat(),
+            "days_held": days,
+            "term": "LTCG" if is_long else "STCG",
+            "invested": round(invested, 2),
+            "current_value": round(current_val, 2),
+            "gain": round(gain, 2),
+        })
+    lt_taxable = max(0.0, lt_gain - LTCG_EXEMPT)
+    st_tax = max(0.0, st_gain) * 0.15
+    lt_tax = lt_taxable * 0.10
+    return {
+        "rows": rows,
+        "summary": {
+            "stcg_gain": round(st_gain, 2),
+            "ltcg_gain": round(lt_gain, 2),
+            "ltcg_exemption": LTCG_EXEMPT,
+            "ltcg_taxable": round(lt_taxable, 2),
+            "stcg_tax": round(st_tax, 2),
+            "ltcg_tax": round(lt_tax, 2),
+            "total_estimated_tax": round(st_tax + lt_tax, 2),
+        },
+        "disclaimer": "Estimate assumes equity-oriented MFs (>65% equity). Indexation not applied.",
+    }
+
+
+# ------------------------------------------------------------------
+# SIP planner (pure calculation, no DB)
+# ------------------------------------------------------------------
+@api.post("/sip-planner")
+async def sip_planner(body: SipPlanIn, current=Depends(get_current_user)):
+    monthly_rate = (body.expected_return / 100.0) / 12.0
+    months = body.years * 12
+    schedule = []
+    fv = 0.0
+    invested = 0.0
+    sip_amount = body.monthly
+    for m in range(1, months + 1):
+        # Monthly compounding + step-up at each year-end
+        fv = (fv + sip_amount) * (1 + monthly_rate)
+        invested += sip_amount
+        if m % 12 == 0:
+            schedule.append({
+                "year": m // 12,
+                "invested": round(invested, 2),
+                "value": round(fv, 2),
+                "wealth_gain": round(fv - invested, 2),
             })
+            sip_amount = sip_amount * (1 + body.step_up / 100.0)
+    return {
+        "summary": {
+            "total_invested": round(invested, 2),
+            "future_value": round(fv, 2),
+            "wealth_gain": round(fv - invested, 2),
+            "multiple": round(fv / invested, 2) if invested else 0,
+        },
+        "schedule": schedule,
+    }
 
-@app.on_event("shutdown")
-async def shutdown():
-    client.close()
 
 # ------------------------------------------------------------------
 # Mount

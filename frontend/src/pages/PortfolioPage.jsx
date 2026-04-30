@@ -1,20 +1,26 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, fmtINR, fmtNum, pct } from "../lib/api";
+import { usePortfolio } from "../lib/portfolio.jsx";
 import { Plus, Trash, X } from "@phosphor-icons/react";
 
 export default function PortfolioPage() {
+  const { activeId } = usePortfolio() || {};
   const [portfolio, setPortfolio] = useState(null);
   const [funds, setFunds] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState({ fund_id: "", units: "", avg_cost: "" });
+  const [form, setForm] = useState({ fund_id: "", units: "", avg_cost: "", purchase_date: "" });
   const [err, setErr] = useState("");
 
   const load = async () => {
-    const [p, f] = await Promise.all([api.get("/portfolio"), api.get("/funds")]);
+    if (!activeId) return;
+    const [p, f] = await Promise.all([
+      api.get("/portfolio", { params: { portfolio_id: activeId } }),
+      api.get("/funds"),
+    ]);
     setPortfolio(p.data); setFunds(f.data);
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [activeId]);
 
   const addItem = async (e) => {
     e.preventDefault();
@@ -24,9 +30,13 @@ export default function PortfolioPage() {
         fund_id: form.fund_id,
         units: parseFloat(form.units),
         avg_cost: parseFloat(form.avg_cost),
+        portfolio_id: activeId,
+        purchase_date: form.purchase_date
+          ? new Date(form.purchase_date).toISOString()
+          : undefined,
       });
       setShowAdd(false);
-      setForm({ fund_id: "", units: "", avg_cost: "" });
+      setForm({ fund_id: "", units: "", avg_cost: "", purchase_date: "" });
       load();
     } catch (e2) {
       setErr(e2.response?.data?.detail || e2.message);
@@ -145,6 +155,17 @@ export default function PortfolioPage() {
                     onChange={(e) => setForm({ ...form, avg_cost: e.target.value })}
                   />
                 </div>
+              </div>
+              <div>
+                <label className="label-uppercase block mb-1.5">Purchase Date (optional)</label>
+                <input
+                  data-testid="date-input"
+                  type="date"
+                  className="w-full bg-secondary/50 border border-border px-3 py-2.5 text-sm mono focus:outline-none focus:border-primary"
+                  value={form.purchase_date}
+                  onChange={(e) => setForm({ ...form, purchase_date: e.target.value })}
+                />
+                <div className="text-[10px] text-muted-foreground mt-1">Used for STCG/LTCG classification.</div>
               </div>
               {err && <div className="text-xs text-destructive">{err}</div>}
               <button
