@@ -29,23 +29,23 @@ sector shifts, manager changes, category reclassifications, asset-allocation dri
 - Per-fund Google News RSS feed via `feedparser`.
 - Pages: Login / Register / Overview / Portfolio / Fund Detail (5 tabs) / Alerts / News.
 
-## Tested
-- 25/25 backend pytest cases pass.
-- E2E playwright flow validated (login, dashboard tiles, portfolio add/remove, all 5 fund tabs,
-  alerts filter, logout). Phase 2: portfolio CRUD, XIRR, tax-report, SIP planner all verified.
+## What's Implemented (2026-02 — Phase 3)
+- **AMFI live NAV**: `/spages/NAVAll.txt` parsed at lifespan startup; 6 funds mapped via scheme codes;
+  cached in `nav_cache` collection. Portfolio P&L now uses live NAV (mock fallback). Manual refresh
+  via `POST /api/nav/refresh` (admin-only).
+- **Resend email**: `RESEND_API_KEY` configured. Settings page (`/settings`) with notification email
+  override, real-time + digest toggles. `POST /api/notifications/test` + `/digest` send styled HTML
+  emails. Real-time emails fire automatically when factsheet uploads detect changes.
+- **Factsheet PDF ingestion** (`/factsheet`): drag-drop PDF → Gemini 3 Pro extracts top holdings,
+  sectors, manager, AUM, expense ratio, asset allocation. Snapshots persisted in
+  `factsheet_snapshots`. Auto-diff vs prior snapshot creates alerts in `db.alerts` for manager /
+  category / objective / name / asset-allocation changes; opted-in users get real-time email.
+- **/api/alerts** now merges static mock alerts + factsheet-generated alerts.
 
-## What's Implemented (2026-02 — Phase 2)
-- **Multi-portfolio support**: users can create/delete named portfolios; default "Main Portfolio"
-  auto-created on signup. Header switcher persists across pages via localStorage. Holdings filtered by
-  active portfolio.
-- **XIRR**: per-portfolio annualised return via Newton-Raphson over cashflows (purchase lots + current
-  value). Rendered as 5th KPI tile on Overview.
-- **Tax Report** (`/tax`): Indian equity-MF rules — STCG ≤1Y @15%, LTCG >1Y @10% above ₹1L exemption.
-  Lot-level table + summary tiles + disclaimer.
-- **SIP Planner** (`/sip`): pure calculator with monthly amount, years, expected return, optional
-  annual step-up. Stacked bar chart of invested vs wealth-gain per year.
-- **FastAPI lifespan** migration replacing deprecated `@app.on_event` decorators. Includes one-shot
-  migration backfilling `portfolio_id` and `purchase_date` on legacy holdings.
+## Tested
+- 39/39 backend pytest cases pass (Phase 3 added 14 tests).
+- Real third-party network calls verified: AMFI HTTP fetch (14k schemes parsed), Resend delivery to
+  `avinashmishra755@gmail.com`, Gemini 3 Pro PDF extraction on synthetic factsheet.
 
 ## Backlog (P1)
 - Email push alerts (Resend / SendGrid).
