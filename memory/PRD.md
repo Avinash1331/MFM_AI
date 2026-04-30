@@ -30,9 +30,22 @@ sector shifts, manager changes, category reclassifications, asset-allocation dri
 - Pages: Login / Register / Overview / Portfolio / Fund Detail (5 tabs) / Alerts / News.
 
 ## Tested
-- 16/16 backend pytest cases pass.
+- 25/25 backend pytest cases pass.
 - E2E playwright flow validated (login, dashboard tiles, portfolio add/remove, all 5 fund tabs,
-  alerts filter, logout).
+  alerts filter, logout). Phase 2: portfolio CRUD, XIRR, tax-report, SIP planner all verified.
+
+## What's Implemented (2026-02 — Phase 2)
+- **Multi-portfolio support**: users can create/delete named portfolios; default "Main Portfolio"
+  auto-created on signup. Header switcher persists across pages via localStorage. Holdings filtered by
+  active portfolio.
+- **XIRR**: per-portfolio annualised return via Newton-Raphson over cashflows (purchase lots + current
+  value). Rendered as 5th KPI tile on Overview.
+- **Tax Report** (`/tax`): Indian equity-MF rules — STCG ≤1Y @15%, LTCG >1Y @10% above ₹1L exemption.
+  Lot-level table + summary tiles + disclaimer.
+- **SIP Planner** (`/sip`): pure calculator with monthly amount, years, expected return, optional
+  annual step-up. Stacked bar chart of invested vs wealth-gain per year.
+- **FastAPI lifespan** migration replacing deprecated `@app.on_event` decorators. Includes one-shot
+  migration backfilling `portfolio_id` and `purchase_date` on legacy holdings.
 
 ## Backlog (P1)
 - Email push alerts (Resend / SendGrid).
@@ -41,7 +54,7 @@ sector shifts, manager changes, category reclassifications, asset-allocation dri
 - News result caching to avoid Google News rate limits.
 
 ## Backlog (P2)
-- XIRR / SIP planner.
-- Tax / capital-gain reports.
-- Multi-portfolio support per user.
-- Lifespan context migration (deprecation cleanup).
+- Transaction-level (BUY/SELL) ledger with FIFO redemption matching for true realized gains.
+- AI watchdog summary (weekly LLM digest).
+- Multi-currency / international funds.
+- One-shot migration flag (skip per-startup walk).
