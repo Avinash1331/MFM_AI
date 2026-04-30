@@ -5,7 +5,7 @@ import { usePortfolio } from "../lib/portfolio.jsx";
 import { api } from "../lib/api";
 import {
   ChartLineUp, Briefcase, Bell, Newspaper, SignOut, Pulse, GridFour,
-  Calculator, Receipt, CaretDown, Plus, X,
+  Calculator, Receipt, CaretDown, Plus, X, FileArrowUp, GearSix,
 } from "@phosphor-icons/react";
 
 export default function AppLayout() {
@@ -34,6 +34,8 @@ export default function AppLayout() {
   const tools = [
     { to: "/sip", icon: Calculator, label: "SIP Planner", id: "nav-sip" },
     { to: "/tax", icon: Receipt, label: "Tax Report", id: "nav-tax" },
+    { to: "/factsheet", icon: FileArrowUp, label: "Factsheet", id: "nav-factsheet" },
+    { to: "/settings", icon: GearSix, label: "Settings", id: "nav-settings" },
   ];
 
   const active = portfolioCtx?.portfolios.find((p) => p.id === portfolioCtx?.activeId);

@@ -11,6 +11,8 @@ import AlertsPage from "@/pages/AlertsPage.jsx";
 import NewsPage from "@/pages/NewsPage.jsx";
 import SipPlannerPage from "@/pages/SipPlannerPage.jsx";
 import TaxReportPage from "@/pages/TaxReportPage.jsx";
+import SettingsPage from "@/pages/SettingsPage.jsx";
+import FactsheetPage from "@/pages/FactsheetPage.jsx";
 
 function App() {
   return (
@@ -29,6 +31,8 @@ function App() {
                 <Route path="/news" element={<NewsPage />} />
                 <Route path="/sip" element={<SipPlannerPage />} />
                 <Route path="/tax" element={<TaxReportPage />} />
+                <Route path="/factsheet" element={<FactsheetPage />} />
+                <Route path="/settings" element={<SettingsPage />} />
               </Route>
             </Routes>
           </BrowserRouter>

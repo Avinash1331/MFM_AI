@@ -1,0 +1,41 @@
+{
+  "summary": "Phase 3 testing complete. Backend: 39/39 pytest pass (16 phase1 + 9 phase2 + 14 phase3). New phase3 tests cover AMFI live NAV (status, refresh admin/non-admin RBAC, portfolio summary live_nav_count), notification settings GET/PUT, Resend test+digest emails (real network calls — both delivered with sent_to=avinashmishra755@gmail.com), alerts merge, factsheet upload validations (422 missing file, 400 non-pdf, 404 unknown fund), and a real Gemini 3 Pro extraction on a synthetic reportlab PDF (returned ok:true with extracted dict and snapshot persisted). Frontend: sidebar Tools shows 4 items (SIP, Tax, Factsheet, Settings) with correct testids; /settings page renders, save+toggle+test+digest all show success toasts; /factsheet page loads with 6 fund options + drop zone + upload button.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Factsheet page", "issues": ["Fund select shows just placeholder for ~2-3s on first load while /api/funds resolves. Consider a small loading state on the dropdown to avoid an empty-looking control."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_backend.py",
+    "/app/backend/tests/test_phase2.py",
+    "/app/backend/tests/test_phase3.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/phase3_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Add a brief loading skeleton on FactsheetPage fund dropdown while /api/funds is in flight.",
+    "(Nit) AppLayout sidebar header reads 'v0.2 // intel' — bump to v0.3 to reflect Phase 3 if you track versions in UI.",
+    "(Nit) factsheet_extractor: if EMERGENT_LLM_KEY is missing or Gemini call fails, the endpoint surfaces a 500 with raw exception text — consider returning a structured 502 with provider error code for cleaner UX."
+  ],
+  "critical_code_review_comments": [
+    "amfi.refresh_nav_cache uses requests in a thread — fine, but no retry/backoff if AMFI returns 5xx; a single retry with jitter would harden the startup path.",
+    "server.upload_factsheet emails every alert in a per-user loop with sequential awaits; for funds with many holders this can be slow — consider asyncio.gather for fan-out.",
+    "/api/notifications/test and /digest do not log who triggered them — add user_id + sent_to to backend log for an audit trail.",
+    "settings/notifications: PUT with notification_email=null does not clear an existing override (Optional[EmailStr] silently skipped) — semantics doc could clarify, or accept empty string to reset.",
+    "factsheet upload: snapshot is stored even if Gemini returned an empty/garbage dict; consider validating extracted has at least one non-null core field before insert + diff.",
+    "server.py is now ~920 lines — start splitting into routers (auth/portfolio/funds/notifications/factsheet) for maintainability."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase3.py"
+  ],
+  "success_rate": {"backend": "100% (39/39)", "frontend": "100% on tested flows"},
+  "test_credentials": "admin@mfintel.com / Admin@12345 (read from /app/memory/test_credentials.md). Resend verified inbox: avinashmishra755@gmail.com.",
+  "seed_data_creation": "Created TEST_phase3_user@example.com via /api/auth/register for the 403 RBAC check on /api/nav/refresh. Test PDF generated in-memory via reportlab — one factsheet snapshot now persists for fund_id=axis-bluechip.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run pytest /app/backend/tests/ — 39 tests pass in ~30s. Phase3 highlights: AMFI cache populates ~2-5s after backend startup; if test_nav_status_admin runs immediately on cold start it will retry up to 30s. Resend send-test/digest are REAL network calls and only deliver to avinashmishra755@gmail.com — set notification_email to that before calling. Factsheet PDF upload uses a synthetic reportlab PDF (~1KB, single page); Gemini 3 Pro accepts it and returns a dict, but extraction quality is poor on synthetic content — assertions only check shape, not fields. New testids verified in UI: nav-factsheet, nav-settings, settings-page, notif-email, toggle-notify_realtime, toggle-notify_digest, save-settings, send-test, send-digest, factsheet-page, fs-fund-select, fs-drop, fs-file-input, fs-upload-btn. Funds list takes 2-3s to populate — wait_for_timeout(3000) before counting options.",
+  "rca of the issue": "No bugs found. Phase 3 backend + frontend both work end-to-end including third-party integrations (AMFI HTTP, Resend SMTP, Gemini PDF extraction)."
+}

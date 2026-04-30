@@ -10,6 +10,7 @@ import uuid
 import logging
 import secrets
 import urllib.parse
+import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
@@ -18,7 +19,7 @@ import bcrypt
 import jwt
 import feedparser
 from bson import ObjectId
-from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends, Query
+from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends, Query, UploadFile, File
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field
@@ -26,6 +27,9 @@ from pydantic import BaseModel, EmailStr, Field
 from mock_data import (
     FUNDS, HOLDINGS, PERFORMANCE, ASSET_ALLOCATION, ALERTS, fund_by_id,
 )
+from amfi import refresh_nav_cache, get_live_nav, get_live_nav_map, SCHEME_CODE_MAP
+from email_service import send_email, render_alert_email, render_digest_email
+from factsheet_extractor import extract_factsheet, diff_factsheet
 
 # ------------------------------------------------------------------
 # Setup
@@ -112,6 +116,11 @@ async def lifespan(app: FastAPI):
                     "purchase_date": pdate,
                     "added_at": pdate,
                 })
+
+    # Fetch live AMFI NAVs in the background (non-blocking)
+    import asyncio as _asyncio
+    _asyncio.create_task(refresh_nav_cache(db))
+
     yield
     client.close()
 
@@ -203,6 +212,11 @@ class SipPlanIn(BaseModel):
     years: int = Field(ge=1, le=60)
     expected_return: float = Field(ge=0, le=50)  # %
     step_up: float = Field(default=0.0, ge=0, le=50)  # annual % step-up
+
+class NotifSettingsIn(BaseModel):
+    notify_realtime: bool = False
+    notify_digest: bool = True
+    notification_email: Optional[EmailStr] = None
 
 # ------------------------------------------------------------------
 # Auth endpoints
@@ -300,6 +314,7 @@ async def get_portfolio(
     if portfolio_id:
         q["portfolio_id"] = portfolio_id
     items = await db.portfolio.find(q, {"_id": 0}).to_list(500)
+    live = await get_live_nav_map(db)
     enriched = []
     total_invested = 0.0
     total_current = 0.0
@@ -307,16 +322,18 @@ async def get_portfolio(
         f = fund_by_id(it["fund_id"])
         if not f:
             continue
+        nav = live.get(f["id"], f["nav"])  # prefer live AMFI
         invested = it["units"] * it["avg_cost"]
-        current_val = it["units"] * f["nav"]
+        current_val = it["units"] * nav
         gain = current_val - invested
         pct = (gain / invested * 100) if invested else 0.0
         total_invested += invested
         total_current += current_val
         enriched.append({**it, "fund": {
             "id": f["id"], "name": f["name"], "amc": f["amc"],
-            "category": f["category"], "nav": f["nav"],
+            "category": f["category"], "nav": nav,
             "manager": f["manager"], "benchmark": f["benchmark"],
+            "live_nav": f["id"] in live,
         }, "invested": round(invested, 2),
            "current_value": round(current_val, 2),
            "gain": round(gain, 2), "gain_pct": round(pct, 2)})
@@ -328,6 +345,7 @@ async def get_portfolio(
             "gain": round(total_current - total_invested, 2),
             "gain_pct": round(((total_current - total_invested) / total_invested * 100) if total_invested else 0.0, 2),
             "fund_count": len(enriched),
+            "live_nav_count": sum(1 for h in enriched if h["fund"]["live_nav"]),
         }
     }
 
@@ -456,10 +474,12 @@ async def list_alerts(current=Depends(get_current_user)):
         {"user_id": current["id"]}, {"_id": 0, "fund_id": 1}
     ).to_list(200)
     fund_ids = {it["fund_id"] for it in portfolio_items}
-    user_alerts = [a for a in ALERTS if a["fund_id"] in fund_ids] if fund_ids else ALERTS
+    static_alerts = [a for a in ALERTS if a["fund_id"] in fund_ids] if fund_ids else ALERTS
+    db_alerts = await db.alerts.find({}, {"_id": 0}).to_list(500)
+    db_alerts = [a for a in db_alerts if not fund_ids or a["fund_id"] in fund_ids]
     fmap = {f["id"]: f for f in FUNDS}
     enriched = []
-    for a in user_alerts:
+    for a in list(static_alerts) + db_alerts:
         f = fmap.get(a["fund_id"])
         enriched.append({**a, "fund_name": f["name"] if f else a["fund_id"]})
     enriched.sort(key=lambda x: x["created_at"], reverse=True)
@@ -716,6 +736,182 @@ async def sip_planner(body: SipPlanIn, current=Depends(get_current_user)):
         },
         "schedule": schedule,
     }
+
+
+# ------------------------------------------------------------------
+# AMFI Live NAV
+# ------------------------------------------------------------------
+@api.get("/nav/status")
+async def nav_status(current=Depends(get_current_user)):
+    docs = await db.nav_cache.find({}, {"_id": 0}).to_list(50)
+    return {"navs": docs, "count": len(docs)}
+
+
+@api.post("/nav/refresh")
+async def nav_refresh(current=Depends(get_current_user)):
+    if current.get("role") != "admin":
+        raise HTTPException(403, "Admin only")
+    return await refresh_nav_cache(db)
+
+
+# ------------------------------------------------------------------
+# Notification settings + email
+# ------------------------------------------------------------------
+@api.get("/settings/notifications")
+async def get_notif_settings(current=Depends(get_current_user)):
+    user = await db.users.find_one({"_id": ObjectId(current["id"])}, {"_id": 0})
+    return {
+        "email": user.get("email"),
+        "notification_email": user.get("notification_email") or user.get("email"),
+        "notify_realtime": bool(user.get("notify_realtime", False)),
+        "notify_digest": bool(user.get("notify_digest", True)),
+    }
+
+
+@api.put("/settings/notifications")
+async def update_notif_settings(body: NotifSettingsIn, current=Depends(get_current_user)):
+    update = {
+        "notify_realtime": body.notify_realtime,
+        "notify_digest": body.notify_digest,
+    }
+    if body.notification_email:
+        update["notification_email"] = body.notification_email.lower()
+    await db.users.update_one({"_id": ObjectId(current["id"])}, {"$set": update})
+    return {"ok": True, **update}
+
+
+async def _user_notif_email(user_id: str, fallback: str) -> str:
+    u = await db.users.find_one({"_id": ObjectId(user_id)}, {"_id": 0, "notification_email": 1})
+    return (u.get("notification_email") if u else None) or fallback
+
+
+@api.post("/notifications/test")
+async def notifications_test(current=Depends(get_current_user)):
+    to = await _user_notif_email(current["id"], current["email"])
+    html = render_alert_email({
+        "type": "test", "severity": "low",
+        "title": "Test email from MF.TERMINAL",
+        "fund_name": "—",
+        "message": "If you received this, your real-time alert pipeline is working.",
+    })
+    res = await send_email(to, "MF.TERMINAL · Test email", html)
+    if not res.get("ok"):
+        raise HTTPException(500, res.get("error", "Send failed"))
+    return {**res, "sent_to": to}
+
+
+@api.post("/notifications/digest")
+async def notifications_digest(current=Depends(get_current_user)):
+    portfolio_items = await db.portfolio.find(
+        {"user_id": current["id"]}, {"_id": 0, "fund_id": 1}
+    ).to_list(200)
+    fund_ids = {it["fund_id"] for it in portfolio_items}
+    static_alerts = [a for a in ALERTS if a["fund_id"] in fund_ids] if fund_ids else []
+    db_alerts = await db.alerts.find({}, {"_id": 0}).to_list(500)
+    db_alerts = [a for a in db_alerts if not fund_ids or a["fund_id"] in fund_ids]
+    fmap = {f["id"]: f for f in FUNDS}
+    items = []
+    for a in list(static_alerts) + db_alerts:
+        f = fmap.get(a["fund_id"])
+        items.append({**a, "fund_name": f["name"] if f else a["fund_id"]})
+    items.sort(key=lambda x: x["created_at"], reverse=True)
+    html = render_digest_email(items)
+    to = await _user_notif_email(current["id"], current["email"])
+    res = await send_email(to, f"MF.TERMINAL · Digest ({len(items)} signals)", html)
+    if not res.get("ok"):
+        raise HTTPException(500, res.get("error", "Send failed"))
+    return {**res, "alert_count": len(items), "sent_to": to}
+
+
+# ------------------------------------------------------------------
+# Factsheet PDF upload + Gemini extraction
+# ------------------------------------------------------------------
+@api.post("/funds/{fund_id}/factsheet")
+async def upload_factsheet(
+    fund_id: str,
+    file: UploadFile = File(...),
+    current=Depends(get_current_user),
+):
+    if not fund_by_id(fund_id):
+        raise HTTPException(404, "Fund not found")
+    if not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(400, "PDF only")
+    body = await file.read()
+    if len(body) > 15 * 1024 * 1024:
+        raise HTTPException(400, "File too large (max 15MB)")
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
+        tf.write(body)
+        path = tf.name
+    try:
+        extracted = await extract_factsheet(path, fund_id)
+    except Exception as e:
+        log.exception("factsheet extraction failed")
+        raise HTTPException(500, f"Extraction failed: {e}")
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    # Compare vs latest snapshot of same fund (any user) for change detection
+    prev = await db.factsheet_snapshots.find_one(
+        {"fund_id": fund_id}, sort=[("created_at", -1)], projection={"_id": 0}
+    )
+    snapshot = {
+        "id": str(uuid.uuid4()),
+        "fund_id": fund_id,
+        "user_id": current["id"],
+        "filename": file.filename,
+        "extracted": extracted,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.factsheet_snapshots.insert_one(snapshot.copy())
+
+    changes = diff_factsheet(prev.get("extracted") if prev else None, extracted)
+    new_alerts = []
+    for ch in changes:
+        a = {
+            "id": f"alrt-{uuid.uuid4().hex[:8]}",
+            "fund_id": fund_id,
+            "type": ch["type"],
+            "severity": ch["severity"],
+            "title": ch["title"],
+            "message": ch["message"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source": "factsheet_upload",
+        }
+        await db.alerts.insert_one(a.copy())
+        new_alerts.append(a)
+
+    # Real-time email push to users who opted in & hold this fund
+    if new_alerts:
+        holders = await db.portfolio.distinct("user_id", {"fund_id": fund_id})
+        async for u in db.users.find(
+            {"_id": {"$in": [ObjectId(h) for h in holders]},
+             "notify_realtime": True},
+            {"email": 1},
+        ):
+            for a in new_alerts:
+                payload = {**a, "fund_name": fund_by_id(fund_id)["name"]}
+                await send_email(u["email"],
+                                 f"MF.TERMINAL · {a['title']}",
+                                 render_alert_email(payload))
+
+    return {
+        "ok": True,
+        "snapshot_id": snapshot["id"],
+        "extracted": extracted,
+        "alerts_generated": new_alerts,
+        "had_previous_snapshot": prev is not None,
+    }
+
+
+@api.get("/funds/{fund_id}/factsheets")
+async def list_factsheets(fund_id: str, current=Depends(get_current_user)):
+    docs = await db.factsheet_snapshots.find(
+        {"fund_id": fund_id}, {"_id": 0}
+    ).sort("created_at", -1).to_list(20)
+    return docs
 
 
 # ------------------------------------------------------------------
