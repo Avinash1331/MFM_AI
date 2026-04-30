@@ -1,0 +1,33 @@
+{
+  "summary": "First-iteration full-stack testing of MF Intelligence. Backend: 16/16 pytest cases pass against public REACT_APP_BACKEND_URL covering auth (register/login/logout/me + bad creds + duplicate), funds list/detail/404, portfolio CRUD with validation, holdings-diff, sector-diff (flag check), performance, asset-allocation, alerts, and Google News RSS. Frontend: login with prefilled demo creds works, redirects to overview which shows Invested ₹44,018 / Current ₹53,538 / +21.63% / 4 schemes / 4 alerts / holdings table / recent alerts. Sidebar nav (Overview/Portfolio/Alerts/News) all working. Portfolio Add modal opens & closes via add-fund-btn / close-modal. Fund detail page loads at /fund/{id} and all 5 tabs (Performance, Holdings, Sectors, Benchmark, News) are clickable. Logout via SIGN OUT (data-testid=logout-btn) clears session and redirects to /login.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "LoginPage demo creds box", "issues": ["Password shown as 'Admin@12345' is correct, but the box also displays the same value the user must memorize without a copy button"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_backend.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Spec said login redirects to /dashboard but app redirects to / (root). Both render the Overview page so functionally fine — update PRD wording or add a /dashboard route alias if strict path matters.",
+    "Consider adding a 'Manage Holdings' link/route from Overview to Portfolio (currently exists as text link, works)."
+  ],
+  "critical_code_review_comments": [
+    "set_auth_cookies uses secure=False; on the HTTPS preview this still works but for production toggling via env is recommended.",
+    "CORS_ORIGINS defaults to '*' which is incompatible with allow_credentials=True per CORS spec — browsers tolerate it for the preview but should be locked to explicit origins for prod.",
+    "@app.on_event('startup'/'shutdown') is deprecated in FastAPI; switch to lifespan context.",
+    "GET /api/portfolio/{item}/news has no caching of feedparser result — every page load hits Google News (could be slow / rate-limited)."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin@mfintel.com / Admin@12345 (read from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None added; admin's 4-fund portfolio is auto-seeded by backend startup. Tests added & removed a SBI Smallcap entry cleanly.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend public URL: REACT_APP_BACKEND_URL. Run pytest /app/backend/tests/test_backend.py. All 16 pass in ~3s. Frontend route is `/` for overview (not `/dashboard`). Fund detail route is `/fund/{id}` (singular). Tab testids: tab-performance | tab-holdings | tab-sectors | tab-benchmark | tab-news. Modal testids: add-fund-btn, add-modal, fund-select, units-input, cost-input, add-submit, close-modal. Logout testid: logout-btn.",
+  "rca of the issue": "No bugs found requiring RCA."
+}
