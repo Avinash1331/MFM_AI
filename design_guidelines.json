@@ -1,0 +1,77 @@
+{
+  "project_context": {
+    "domain": "Finance, Mutual Fund Intelligence",
+    "theme": "Dark",
+    "archetype": "Archetype 4 (Swiss & High-Contrast) - Bloomberg Terminal Variant",
+    "vibe": "Objective, dense, authoritative, rigid, highly functional, data-first"
+  },
+  "colors": {
+    "background": "hsl(240 10% 4%)",
+    "foreground": "hsl(0 0% 98%)",
+    "card": "hsl(240 10% 6%)",
+    "card_foreground": "hsl(0 0% 98%)",
+    "border": "hsl(240 10% 15%)",
+    "primary": "hsl(142 71% 45%)",
+    "primary_foreground": "hsl(0 0% 0%)",
+    "destructive": "hsl(0 84% 60%)",
+    "destructive_foreground": "hsl(0 0% 98%)",
+    "muted": "hsl(240 5% 15%)",
+    "muted_foreground": "hsl(240 5% 65%)",
+    "accent": "hsl(43 100% 50%)",
+    "accent_foreground": "hsl(0 0% 0%)",
+    "instructions": "Update index.css to use these strict dark mode variables. Ensure positive values (beating benchmark, new holdings) use primary green, and negative values use destructive red."
+  },
+  "typography": {
+    "headings": "Chivo, sans-serif",
+    "body": "IBM Plex Sans, sans-serif",
+    "mono_data": "IBM Plex Mono, monospace",
+    "hierarchy": {
+      "h1": "text-2xl sm:text-3xl tracking-tighter font-black",
+      "h2": "text-xl sm:text-2xl tracking-tight font-bold",
+      "h3": "text-lg sm:text-xl font-semibold",
+      "h4": "text-xs sm:text-sm uppercase tracking-[0.2em] font-medium text-muted-foreground",
+      "body": "text-sm leading-relaxed",
+      "data_heavy": "text-xs font-mono"
+    },
+    "instructions": "Import Chivo, IBM Plex Sans, and IBM Plex Mono from Google Fonts. Do NOT use Inter for headings. Use uppercase mono text for table headers."
+  },
+  "layout_and_spacing": {
+    "grid_system": "MODE B: THE CONTROL ROOM GRID",
+    "base_grid": "grid-cols-1 lg:grid-cols-12",
+    "gap": "gap-4 or use gap-[1px] with a dark wrapper background to create a true 'border-collapse' terminal grid look.",
+    "padding": "Dense. p-3 or p-4 inside widgets. Avoid generous p-8 in dashboards unless it is an empty state.",
+    "card_style": "Flat background, 1px solid subtle border (border-border). Sharp corners. Override standard Shadcn rounded-xl."
+  },
+  "components": {
+    "navigation": "Sticky top-bar or left-rail. Solid background (hsl(240 10% 4%)) with hard bottom/right 1px border. No glassmorphism.",
+    "buttons": "Square edges (rounded-none or max rounded-sm), solid fill for primary. Ghost with sharp 1px borders for secondary.",
+    "tables": "Dense. Use mono font for numbers. Right-align numbers. Zebra striping with very subtle background shift (bg-muted/30).",
+    "charts": "Use Recharts with dark mode axes. Green for beating benchmark, Red for trailing. Remove soft curves, use step-lines or sharp linear interpolation.",
+    "cards": "Force rounded-none or rounded-sm. No box-shadows. 1px solid borders."
+  },
+  "visual_enhancers": {
+    "borders": "Grid Borders strategy. Expose the skeleton using border-white/10.",
+    "effects": "No heavy gradients. Flat, solid colors. Use 1px inner highlights selectively.",
+    "icons": "Phosphor Icons (dense and readable at small sizes)."
+  },
+  "images": {
+    "login_hero_bg": {
+      "url": "https://images.unsplash.com/photo-1775057154553-0f3e8902fea3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTF8MHwxfHNlYXJjaHwyfHxkYXJrJTIwZGF0YSUyMGdyaWQlMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3NzU2NjU5Nnww&ixlib=rb-4.1.0&q=85",
+      "description": "Abstract geometric lines and shapes on black background",
+      "category": "Login Page Background",
+      "instructions": "Use this purely as a dramatic, muted background (opacity 10-20%) for the Login/Register page."
+    }
+  },
+  "instructions_to_main_agent": [
+    "Install Phosphor Icons: yarn add @phosphor-icons/react",
+    "Override default tailwind --radius to 0rem or 0.125rem in index.css to achieve the sharp Bloomberg terminal aesthetic.",
+    "Update index.css root and .dark classes with the strict monochrome + bright green/red accent palette defined above.",
+    "Implement the layout using CSS Grid with tight gaps to maximize screen real estate.",
+    "Ensure all numerical data, tickers, and percentages use 'IBM Plex Mono' (or generic monospace if not loaded) for vertical alignment.",
+    "For the 'Month-on-Month Sector Weight Change' delta bars, use stark Green/Red blocks without rounded corners.",
+    "Do not use Shadcn default Card styling out of the box (which is rounded and soft). Override it to be flat, sharp, and bordered.",
+    "All interactive elements MUST include data-testid attributes based on role (e.g., data-testid='fund-selector-dropdown').",
+    "For the Alerts Center, use the warning/accent color (Amber) for category/objective changes, and primary (Green) or destructive (Red) for manager changes depending on the context.",
+    "Limit color usage strictly to data encoding (Green = Good/Up/Beating, Red = Bad/Down/Failing). Keep the rest of the UI completely grayscale."
+  ]
+}
